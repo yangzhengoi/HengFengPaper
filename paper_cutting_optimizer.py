@@ -1,4 +1,4 @@
-# paper_cutting_optimizer.py - 在线部署优化版
+# paper_cutting_optimizer.py - 修复版本
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -157,13 +157,26 @@ def main():
     # 订单输入
     st.header("订单输入")
     
+    # 添加示例选择
+    example_option = st.selectbox(
+        "选择示例数据或手动输入",
+        ["手动输入", "示例1: 1810×51, 1715×86, 1860×26", "示例2: 1510×37, 1720×10, 1900×49"]
+    )
+    
+    if example_option == "示例1: 1810×51, 1715×86, 1860×26":
+        default_orders = "1810,51\n1715,86\n1860,26"
+    elif example_option == "示例2: 1510×37, 1720×10, 1900×49":
+        default_orders = "1510,37\n1720,10\n1900,49"
+    else:
+        default_orders = ""
+    
     col1, col2 = st.columns(2)
     
     with col1:
         order_input = st.text_area(
             "订单数据",
             height=200,
-            value="1810,51\n1715,86\n1860,26",
+            value=default_orders,
             help="每行输入一个规格，格式：宽度(mm),数量"
         )
     
@@ -251,31 +264,53 @@ def main():
             st.subheader("生产计划详情")
             plan_df = pd.DataFrame(result['production_plan'])
             plan_df['总废料'] = plan_df['waste_per_coil'] * plan_df['runs']
-            plan_df['利用率'] = plan_df['utilization'].apply(lambda x: f"{x*100:.2f}%")
+            plan_df['利用率百分比'] = plan_df['utilization'].apply(lambda x: f"{x*100:.2f}%")
             
-            display_cols = ['pattern', 'runs', '利用率', 'waste_per_coil', '总废料']
+            display_cols = ['pattern', 'runs', '利用率百分比', 'waste_per_coil', '总废料']
             st.dataframe(plan_df[display_cols], use_container_width=True)
             
-            # 创建可视化图表
-            fig = make_subplots(
-                rows=1, cols=2,
-                subplot_titles=('各方案利用率', '废料分布'),
-                specs=[[{"type": "bar"}, {"type": "pie"}]]
-            )
+            # 创建可视化图表 - 修复后的代码
+            try:
+                # 创建两个独立的图表而不是子图，避免复杂性问题
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # 利用率柱状图
+                    fig_bar = px.bar(
+                        plan_df, 
+                        x='pattern', 
+                        y='utilization',
+                        title='各方案利用率',
+                        labels={'utilization': '利用率', 'pattern': '切割方案'}
+                    )
+                    fig_bar.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                
+                with col2:
+                    # 废料饼图
+                    fig_pie = px.pie(
+                        plan_df,
+                        values='总废料',
+                        names='pattern',
+                        title='废料分布'
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                    
+            except Exception as e:
+                st.warning(f"图表生成遇到问题: {str(e)}")
+                # 提供简单的文本分析作为备选
+                st.info("文本分析:")
+                best_pattern = plan_df.loc[plan_df['utilization'].idxmax()]
+                st.write(f"最佳方案: {best_pattern['pattern']} (利用率: {best_pattern['utilization']*100:.1f}%)")
             
-            fig.add_trace(
-                go.Bar(name='利用率', x=plan_df['pattern'], y=plan_df['utilization'].str.rstrip('%').astype('float'), 
-                      marker_color='lightgreen'),
-                row=1, col=1
+            # 添加下载功能
+            csv = plan_df[display_cols].to_csv(index=False)
+            st.download_button(
+                label="下载生产计划CSV",
+                data=csv,
+                file_name="生产计划.csv",
+                mime="text/csv"
             )
-            
-            fig.add_trace(
-                go.Pie(labels=plan_df['pattern'], values=plan_df['总废料'], name='废料分布'),
-                row=1, col=2
-            )
-            
-            fig.update_layout(height=400, title_text="生产计划分析")
-            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("无生产计划数据")
         
@@ -283,18 +318,28 @@ def main():
         if result['remaining_orders']:
             st.warning(f"剩余订单: {result['remaining_orders']}")
         else:
-            st.success("所有订单已完成！")
+            st.success("✅ 所有订单已完成！")
         
         # 经济效益估算
         st.subheader("经济效益估算")
         waste_saving = result['total_waste'] / 1000  # 转换为米
-        cost_saving = waste_saving * 0.033 * 1.5 * 6000 / 1000  # 简化计算
+        # 简化的成本计算：废料长度 × 纸的密度 × 幅宽 × 单价
+        cost_saving = waste_saving * 0.033 * 1.5 * 6000 / 1000  # 假设33g/㎡, 1.5米幅宽, 6000元/吨
         
         st.info(f"""
-        - 预计节约原料: **{waste_saving:.1f} 米**
-        - 预计节约成本: **{cost_saving:.0f} 元** (按33g/㎡, 1.5米幅宽, 6000元/吨估算)
-        - 平均利用率: **{result['utilization_rate']*100:.1f}%**
+        - **预计节约原料**: {waste_saving:.1f} 米
+        - **预计节约成本**: {cost_saving:.0f} 元 
+        - **平均利用率**: {result['utilization_rate']*100:.1f}%
         """)
+        
+        # 添加使用建议
+        st.subheader("生产建议")
+        if result['utilization_rate'] > 0.95:
+            st.success("🎉 优化效果优秀，建议按此方案生产")
+        elif result['utilization_rate'] > 0.9:
+            st.info("👍 优化效果良好，可以按此方案生产")
+        else:
+            st.warning("⚠️ 利用率偏低，建议调整订单组合或参数")
 
 if __name__ == "__main__":
     main()
