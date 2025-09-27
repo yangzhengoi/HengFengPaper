@@ -1,4 +1,4 @@
-# paper_cutting_optimizer.py - 添加恒丰纸业Logo版本
+# paper_cutting_optimizer.py - 完整版本，包含恒丰纸业Logo
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,9 +7,8 @@ import plotly.graph_objects as go
 from itertools import product
 from collections import Counter
 import time
-import base64
 
-# 设置页面配置 - 同时设置标签页图标和页面标题
+# 设置页面配置
 st.set_page_config(
     page_title="恒丰纸业 - 辊纸套切优化系统",
     page_icon="📊",
@@ -17,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自定义CSS样式，用于美化Logo显示
+# 自定义CSS样式
 def add_custom_css():
     st.markdown("""
     <style>
@@ -39,26 +38,222 @@ def add_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
-# 显示Logo的函数
-def display_logo(logo_path, width=300):
-    try:
-        # 方法1: 直接使用st.image
-        st.image(logo_path, width=width)
-    except:
-        try:
-            # 方法2: 使用HTML和base64编码（备用方案）
-            with open(logo_path, "rb") as f:
-                logo_data = base64.b64encode(f.read()).decode()
+# 辊纸套切优化器类
+class PaperCuttingOptimizer:
+    def __init__(self, master_width=5480, min_utilization=0.9):
+        self.master_width = master_width
+        self.min_utilization = min_utilization
+        self.min_width = master_width * min_utilization
+    
+    def generate_patterns(self, widths, max_pieces=4):
+        """生成所有可行的切割方案"""
+        patterns = []
+        
+        for num_pieces in range(1, max_pieces + 1):
+            for combo in product(widths, repeat=num_pieces):
+                total_width = sum(combo)
+                
+                if total_width <= self.master_width and total_width >= self.min_width:
+                    pattern_counter = Counter(combo)
+                    pattern_desc = '+'.join(f"{count}×{width}" for width, count in pattern_counter.items())
+                    
+                    utilization = total_width / self.master_width
+                    
+                    patterns.append({
+                        'description': pattern_desc,
+                        'total_width': total_width,
+                        'utilization': round(utilization, 4),
+                        'composition': dict(pattern_counter),
+                        'waste': self.master_width - total_width
+                    })
+        
+        # 去重并按利用率降序排序
+        unique_patterns = {}
+        for pattern in patterns:
+            key = tuple(sorted(pattern['composition'].items()))
+            if key not in unique_patterns or pattern['utilization'] > unique_patterns[key]['utilization']:
+                unique_patterns[key] = pattern
+        
+        return sorted(unique_patterns.values(), key=lambda x: x['utilization'], reverse=True)
+    
+    def find_optimal_combination(self, orders, patterns):
+        """找到能完全消耗订单的最优组合"""
+        best_combination = None
+        best_utilization = 0
+        
+        for pattern in patterns:
+            # 检查这个模式是否能完全匹配订单
+            matches = True
+            max_runs = float('inf')
             
-            st.markdown(f"""
-            <div class="logo-container">
-                <img src="data:image/png;base64,{logo_data}" class="logo-img" alt="恒丰纸业Logo">
-            </div>
-            """, unsafe_allow_html=True)
-        except Exception as e:
-            st.warning(f"Logo加载失败: {str(e)}")
+            for width, count in pattern['composition'].items():
+                if count > 0:
+                    available = orders.get(width, 0)
+                    if available < count:
+                        matches = False
+                        break
+                    max_runs = min(max_runs, available // count)
+            
+            if matches and max_runs > 0:
+                # 检查是否能完全消耗所有订单
+                temp_orders = orders.copy()
+                for width, count in pattern['composition'].items():
+                    temp_orders[width] -= count * max_runs
+                
+                # 如果完全消耗了所有订单，这是一个完美方案
+                if all(qty == 0 for qty in temp_orders.values()):
+                    if pattern['utilization'] > best_utilization:
+                        best_utilization = pattern['utilization']
+                        best_combination = (pattern, max_runs)
+        
+        return best_combination
+    
+    def greedy_optimize(self, orders, max_iterations=1000):
+        """贪心算法优化 - 确保完全消耗订单"""
+        start_time = time.time()
+        
+        widths = list(orders.keys())
+        patterns = self.generate_patterns(widths)
+        patterns.sort(key=lambda x: x['utilization'], reverse=True)
+        
+        # 首先检查是否存在能完全消耗订单的单一组合
+        perfect_combination = self.find_optimal_combination(orders, patterns)
+        if perfect_combination:
+            pattern, runs = perfect_combination
+            production_plan = [{
+                'pattern': pattern['description'],
+                'runs': runs,
+                'utilization': pattern['utilization'],
+                'waste_per_coil': pattern['waste'],
+                'composition': pattern['composition']
+            }]
+            
+            total_coils_used = runs
+            total_waste = pattern['waste'] * runs
+            remaining_orders = {}
+        else:
+            # 使用逐步优化的方法
+            remaining_orders = orders.copy()
+            production_plan = []
+            total_coils_used = 0
+            total_waste = 0
+            
+            iteration = 0
+            while any(remaining_orders.values()) and iteration < max_iterations:
+                iteration += 1
+                best_pattern = None
+                best_score = -1
+                best_runs = 0
+                
+                for pattern in patterns:
+                    # 检查模式是否可行
+                    feasible = True
+                    max_runs = float('inf')
+                    
+                    for width, count in pattern['composition'].items():
+                        if remaining_orders.get(width, 0) < count:
+                            feasible = False
+                            break
+                        if count > 0:
+                            max_runs = min(max_runs, remaining_orders.get(width, 0) // count)
+                    
+                    if feasible and max_runs > 0:
+                        # 评分标准：利用率 + 对完成订单的贡献度
+                        score = pattern['utilization']
+                        
+                        # 优先选择能更快完成订单的模式
+                        completion_bonus = 0
+                        for width, count in pattern['composition'].items():
+                            if count > 0:
+                                # 如果这个模式能完全消耗某个规格的剩余订单
+                                if remaining_orders[width] == count * max_runs:
+                                    completion_bonus += 0.2
+                        
+                        score += completion_bonus
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_pattern = pattern
+                            best_runs = max_runs
+                
+                if best_pattern is None:
+                    # 如果没有找到可行模式，尝试放宽条件
+                    for pattern in patterns:
+                        max_runs = float('inf')
+                        feasible = True
+                        
+                        for width, count in pattern['composition'].items():
+                            if count > 0:
+                                available = remaining_orders.get(width, 0)
+                                if available < count:
+                                    # 这个规格不足，但我们可以减少运行次数
+                                    feasible = True
+                                    max_runs = 0
+                                    break
+                                max_runs = min(max_runs, available // count)
+                        
+                        if feasible and max_runs > 0:
+                            score = pattern['utilization']
+                            if score > best_score:
+                                best_score = score
+                                best_pattern = pattern
+                                best_runs = max_runs
+                    
+                    if best_pattern is None:
+                        # 如果仍然没有找到，使用单一切割模式完成剩余订单
+                        for width, quantity in remaining_orders.items():
+                            if quantity > 0 and width <= self.master_width:
+                                # 创建单一切割模式
+                                single_pattern = {
+                                    'description': f"1×{width}",
+                                    'total_width': width,
+                                    'utilization': width / self.master_width,
+                                    'composition': {width: 1},
+                                    'waste': self.master_width - width
+                                }
+                                production_plan.append({
+                                    'pattern': single_pattern['description'],
+                                    'runs': quantity,
+                                    'utilization': single_pattern['utilization'],
+                                    'waste_per_coil': single_pattern['waste'],
+                                    'composition': single_pattern['composition']
+                                })
+                                total_coils_used += quantity
+                                total_waste += single_pattern['waste'] * quantity
+                                remaining_orders[width] = 0
+                        break
+                
+                if best_pattern:
+                    production_plan.append({
+                        'pattern': best_pattern['description'],
+                        'runs': best_runs,
+                        'utilization': best_pattern['utilization'],
+                        'waste_per_coil': best_pattern['waste'],
+                        'composition': best_pattern['composition']
+                    })
+                    
+                    for width, count in best_pattern['composition'].items():
+                        remaining_orders[width] -= count * best_runs
+                    
+                    total_coils_used += best_runs
+                    total_waste += best_pattern['waste'] * best_runs
+                    
+                    # 移除已完成的规格
+                    remaining_orders = {k: v for k, v in remaining_orders.items() if v > 0}
+        
+        utilization_rate = 1 - (total_waste / (total_coils_used * self.master_width)) if total_coils_used > 0 else 0
+        
+        return {
+            'method': '贪心算法',
+            'production_plan': production_plan,
+            'total_coils': total_coils_used,
+            'total_waste': total_waste,
+            'utilization_rate': round(utilization_rate, 4),
+            'remaining_orders': remaining_orders,
+            'computation_time': round(time.time() - start_time, 2)
+        }
 
-# 主应用代码
+# 主应用函数
 def main():
     # 添加自定义CSS
     add_custom_css()
@@ -81,7 +276,7 @@ def main():
         logo_loaded = False
         for logo_path in logo_paths:
             try:
-                display_logo(logo_path, width=250)
+                st.image(logo_path, width=250)
                 logo_loaded = True
                 break
             except:
@@ -128,13 +323,15 @@ def main():
     # 添加示例选择
     example_option = st.selectbox(
         "选择示例数据或手动输入",
-        ["手动输入", "示例1: 1810×51, 1715×86, 1860×26", "示例2: 1510×37, 1720×10, 1900×49"]
+        ["手动输入", "示例1: 1810×51, 1715×86, 1860×26", "示例2: 1510×37, 1720×10, 1900×49", "示例3: 1810×10, 1660×11"]
     )
     
     if example_option == "示例1: 1810×51, 1715×86, 1860×26":
         default_orders = "1810,51\n1715,86\n1860,26"
     elif example_option == "示例2: 1510×37, 1720×10, 1900×49":
         default_orders = "1510,37\n1720,10\n1900,49"
+    elif example_option == "示例3: 1810×10, 1660×11":
+        default_orders = "1810,10\n1660,11"
     else:
         default_orders = ""
     
@@ -161,9 +358,10 @@ def main():
         - 每行一个规格
         - 格式：宽度(mm),数量
         - 宽度为整数，数量为整数
+        - 系统将确保完全消耗所有订单
         """)
     
-    # ==================== 订单处理逻辑（保持不变）====================
+    # ==================== 订单处理逻辑 ====================
     # 解析订单数据
     orders = {}
     try:
@@ -191,14 +389,7 @@ def main():
     order_df = pd.DataFrame([(w, q) for w, q in orders.items()], columns=['宽度(mm)', '数量'])
     st.dataframe(order_df, use_container_width=True)
     
-    # 优化器类和优化逻辑保持不变...
-    # 这里省略了PaperCuttingOptimizer类的定义以保持简洁
-    # 您需要将之前完整的PaperCuttingOptimizer类定义放在这里
-    
     # 初始化优化器
-    from paper_cutting_optimizer_class import PaperCuttingOptimizer  # 假设类在单独文件中
-    # 或者直接在这里定义PaperCuttingOptimizer类
-    
     optimizer = PaperCuttingOptimizer(master_width, min_utilization)
     
     # 生成可行方案
@@ -258,6 +449,38 @@ def main():
             display_cols = ['pattern', 'runs', '利用率百分比', 'waste_per_coil', '总废料']
             st.dataframe(plan_df[display_cols], use_container_width=True)
             
+            # 创建可视化图表
+            try:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # 利用率柱状图
+                    fig_bar = px.bar(
+                        plan_df, 
+                        x='pattern', 
+                        y=plan_df['utilization']*100,
+                        title='各方案利用率 (%)',
+                        labels={'y': '利用率 (%)', 'pattern': '切割方案'}
+                    )
+                    fig_bar.update_layout(xaxis_tickangle=-45, showlegend=False)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                
+                with col2:
+                    # 废料饼图
+                    if len(plan_df) > 1:
+                        fig_pie = px.pie(
+                            plan_df,
+                            values='总废料',
+                            names='pattern',
+                            title='废料分布'
+                        )
+                        st.plotly_chart(fig_pie, use_container_width=True)
+                    else:
+                        st.info("单一方案，无需显示废料分布图")
+                        
+            except Exception as e:
+                st.warning(f"图表生成遇到问题: {str(e)}")
+            
             # 添加下载功能
             csv = plan_df[display_cols].to_csv(index=False)
             st.download_button(
@@ -266,6 +489,31 @@ def main():
                 file_name="恒丰纸业_生产计划.csv",
                 mime="text/csv"
             )
+        
+        # 经济效益估算
+        st.subheader("经济效益估算")
+        total_material = result['total_coils'] * master_width
+        used_material = total_material - result['total_waste']
+        waste_saving = result['total_waste'] / 1000  # 转换为米
+        
+        # 简化的成本计算
+        cost_saving = waste_saving * 0.033 * (master_width/1000) * 6000 / 1000
+        
+        st.info(f"""
+        - **总使用原料**: {used_material/1000:.1f} 米
+        - **总废料**: {waste_saving:.1f} 米
+        - **预计节约成本**: {cost_saving:.0f} 元 
+        - **平均利用率**: {result['utilization_rate']*100:.1f}%
+        """)
+        
+        # 添加使用建议
+        st.subheader("生产建议")
+        if result['utilization_rate'] > 0.95:
+            st.success("🎉 优化效果优秀，建议按此方案生产")
+        elif result['utilization_rate'] > 0.9:
+            st.info("👍 优化效果良好，可以按此方案生产")
+        else:
+            st.warning("⚠️ 利用率偏低，建议调整订单组合或参数")
         
         # 页脚添加公司信息
         st.markdown("---")
