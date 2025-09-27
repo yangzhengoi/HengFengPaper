@@ -1,8 +1,8 @@
-# paper_cutting_optimizer_pro.py - 实用生产版本
+# paper_cutting_optimizer.py - 修复版本
 import streamlit as st
 import pandas as pd
 import numpy as np
-from itertools import product, combinations
+from itertools import product
 from collections import Counter
 import time
 
@@ -16,15 +16,6 @@ st.set_page_config(
 
 class PracticalCuttingOptimizer:
     def __init__(self, master_width=5480, min_utilization=0.85, max_patterns=3, allow_waste=0.05):
-        """
-        实用套切优化器
-        
-        Args:
-            master_width: 母卷宽度
-            min_utilization: 最低利用率阈值
-            max_patterns: 最大允许的方案种类数（减少换刀次数）
-            allow_waste: 允许的损耗比例（5%）
-        """
         self.master_width = master_width
         self.min_utilization = min_utilization
         self.max_patterns = max_patterns
@@ -35,8 +26,8 @@ class PracticalCuttingOptimizer:
         """生成高效切割方案，优先考虑高利用率和简单组合"""
         patterns = []
         
-        # 优先考虑2-3种规格的组合（生产操作简单）
-        for num_pieces in range(2, 4):  # 2-3种规格
+        # 生成所有可能的组合（1-4种规格）
+        for num_pieces in range(1, 5):
             for combo in product(widths, repeat=num_pieces):
                 total_width = sum(combo)
                 
@@ -58,19 +49,25 @@ class PracticalCuttingOptimizer:
         return patterns
     
     def evaluate_pattern_score(self, pattern, remaining_orders, used_patterns_count):
-        """评估方案得分，综合考虑利用率、生产效率和换刀成本"""
-        base_score = pattern['utilization']  # 基础分：利用率
-        
-        # 生产效率奖励：方案能运行的次数越多越好
+        """评估方案得分，返回(score, max_runs)元组"""
+        # 首先检查模式是否可行，计算最大运行次数
         max_runs = float('inf')
         for width, count in pattern['composition'].items():
             if count > 0:
                 available = remaining_orders.get(width, 0)
                 if available < count:
-                    return -1  # 不可行
+                    # 不可行，返回负分和0运行次数
+                    return -1, 0
                 max_runs = min(max_runs, available // count)
         
-        production_efficiency = min(max_runs / 10, 1.0)  # 运行次数奖励
+        if max_runs == 0:
+            return -1, 0  # 不可行
+        
+        # 计算得分
+        base_score = pattern['utilization']  # 基础分：利用率
+        
+        # 生产效率奖励：方案能运行的次数越多越好
+        production_efficiency = min(max_runs / 10, 1.0)
         base_score += production_efficiency * 0.2
         
         # 换刀成本惩罚：方案种类越多，惩罚越大
@@ -80,9 +77,9 @@ class PracticalCuttingOptimizer:
         # 简单组合奖励：2-3种规格的组合更受欢迎
         complexity_bonus = 0
         if pattern['complexity'] == 2:
-            complexity_bonus = 0.15  # 双切分奖励
+            complexity_bonus = 0.15
         elif pattern['complexity'] == 3:
-            complexity_bonus = 0.1   # 三切分奖励
+            complexity_bonus = 0.1
         
         base_score += complexity_bonus
         
@@ -99,6 +96,7 @@ class PracticalCuttingOptimizer:
         production_plan = []
         used_patterns = set()
         total_coils_used = 0
+        total_waste = 0
         
         iteration = 0
         max_iterations = 50
@@ -150,8 +148,8 @@ class PracticalCuttingOptimizer:
                                 max_runs = min(max_runs, available // count)
                     
                     if feasible and max_runs > 0:
-                        pattern_key = tuple(sorted(best_pattern['composition'].keys()))
-                        score = best_pattern['utilization']
+                        pattern_key = tuple(sorted(pattern['composition'].keys()))
+                        score = pattern['utilization']
                         if pattern_key not in used_patterns:
                             score *= 0.8  # 新方案惩罚
                         
@@ -161,6 +159,29 @@ class PracticalCuttingOptimizer:
                             best_runs = max_runs
                 
                 if best_pattern is None:
+                    # 仍然没有找到，使用单一切割完成剩余
+                    for width, quantity in list(remaining_orders.items()):
+                        if quantity > 0 and width <= self.master_width:
+                            # 创建单一切割模式（最后手段）
+                            single_utilization = width / self.master_width
+                            if single_utilization >= 0.8:  # 只有利用率足够高时才使用
+                                single_pattern = {
+                                    'description': f"1×{width}",
+                                    'total_width': width,
+                                    'utilization': single_utilization,
+                                    'composition': {width: 1},
+                                    'complexity': 1
+                                }
+                                production_plan.append({
+                                    'pattern': single_pattern['description'],
+                                    'runs': quantity,
+                                    'utilization': single_pattern['utilization'],
+                                    'composition': single_pattern['composition'],
+                                    'pattern_type': f"单一切割"
+                                })
+                                total_coils_used += quantity
+                                total_waste += (self.master_width - width) * quantity
+                                remaining_orders[width] = 0
                     break
             
             # 应用最佳方案
@@ -169,7 +190,7 @@ class PracticalCuttingOptimizer:
             
             # 确定实际运行次数（考虑生产效率）
             actual_runs = best_runs
-            if actual_runs > 20:  # 单方案运行次数不宜过多，避免其他规格等待
+            if actual_runs > 20:  # 单方案运行次数不宜过多
                 actual_runs = min(actual_runs, 20)
             
             production_plan.append({
@@ -182,29 +203,25 @@ class PracticalCuttingOptimizer:
             
             # 更新剩余订单
             for width, count in best_pattern['composition'].items():
-                remaining_orders[width] -= count * actual_runs
+                remaining_orders[width] = remaining_orders.get(width, 0) - count * actual_runs
             
             total_coils_used += actual_runs
+            waste_per_coil = self.master_width - best_pattern['utilization'] * self.master_width
+            total_waste += waste_per_coil * actual_runs
             
             # 移除已完成或超额生产的规格
             remaining_orders = {k: v for k, v in remaining_orders.items() 
                                if v > -int(orders.get(k, 0) * self.allow_waste)}
-        
-        # 计算废料和利用率
-        total_waste = 0
-        for plan in production_plan:
-            waste_per_coil = self.master_width - plan['utilization'] * self.master_width
-            total_waste += waste_per_coil * plan['runs']
-        
-        utilization_rate = 1 - (total_waste / (total_coils_used * self.master_width)) if total_coils_used > 0 else 0
         
         # 计算实际完成情况
         actual_production = {}
         for width in orders.keys():
             produced = orders[width] - remaining_orders.get(width, 0)
             if produced < 0:  # 超额生产
-                produced = orders[width]
+                produced = orders[width] + abs(produced)  # 实际生产量
             actual_production[width] = produced
+        
+        utilization_rate = 1 - (total_waste / (total_coils_used * self.master_width)) if total_coils_used > 0 else 0
         
         return {
             'production_plan': production_plan,
@@ -221,10 +238,6 @@ def main():
     st.title("🏭 恒丰纸业 - 实用套切优化系统")
     st.markdown("""
     **优化目标**：在保证高利用率的同时，尽量减少换刀次数和生产车数
-    - ✅ 优先选择2-3种规格的简单组合
-    - ✅ 限制方案种类数，减少换刀次数  
-    - ✅ 允许合理损耗，避免过度优化
-    - ✅ 平衡单方案运行次数，提高生产效率
     """)
     
     # 侧边栏 - 生产参数设置
@@ -235,9 +248,9 @@ def main():
         master_width = st.number_input("母卷宽度 (mm)", value=5480, min_value=1000, max_value=10000)
         min_utilization = st.slider("最低利用率", value=0.88, min_value=0.7, max_value=0.95)
     with col2:
-        max_patterns = st.slider("最大方案种类", value=3, min_value=1, max_value=5, 
+        max_patterns = st.slider("最大方案种类", value=3, min_value=1, max_value=5,
                                help="限制换刀次数，提高生产效率")
-        allow_waste = st.slider("允许损耗率", value=0.03, min_value=0.0, max_value=0.1, 
+        allow_waste = st.slider("允许损耗率", value=0.03, min_value=0.0, max_value=0.1,
                               help="允许的超额生产比例")
     
     # 订单输入
@@ -246,15 +259,12 @@ def main():
     # 常用订单模板
     template_option = st.selectbox(
         "选择订单模板或手动输入",
-        ["手动输入", "模板1: 1810×51, 1715×86, 1860×26", "模板2: 1510×37, 1720×10, 1900×49",
-         "模板3: 1810×10, 1660×11", "模板4: 大订单优化"]
+        ["手动输入", "模板1: 1810×51, 1715×86, 1860×26", "模板2: 1510×37, 1720×10, 1900×49"]
     )
     
     templates = {
         "模板1: 1810×51, 1715×86, 1860×26": "1810,51\n1715,86\n1860,26",
-        "模板2: 1510×37, 1720×10, 1900×49": "1510,37\n1720,10\n1900,49", 
-        "模板3: 1810×10, 1660×11": "1810,10\n1660,11",
-        "模板4: 大订单优化": "1600,100\n1700,80\n1800,60\n1900,40"
+        "模板2: 1510×37, 1720×10, 1900×49": "1510,37\n1720,10\n1900,49"
     }
     
     default_orders = templates.get(template_option, "")
@@ -277,19 +287,8 @@ def main():
     
     # 显示订单摘要
     st.subheader("📊 订单摘要")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        order_df = pd.DataFrame([(w, q) for w, q in orders.items()], 
-                              columns=['宽度(mm)', '数量'])
-        st.dataframe(order_df, use_container_width=True)
-    
-    with col2:
-        total_pieces = sum(orders.values())
-        avg_width = sum(w * q for w, q in orders.items()) / total_pieces
-        st.metric("总件数", total_pieces)
-        st.metric("平均宽度", f"{avg_width:.0f}mm")
-        st.metric("规格数量", len(orders))
+    order_df = pd.DataFrame([(w, q) for w, q in orders.items()], columns=['宽度(mm)', '数量'])
+    st.dataframe(order_df, use_container_width=True)
     
     # 运行优化
     if st.button("🚀 开始优化计算", type="primary"):
@@ -319,38 +318,36 @@ def main():
         if result['production_plan']:
             plan_df = pd.DataFrame(result['production_plan'])
             plan_df['利用率%'] = (plan_df['utilization'] * 100).round(1)
-            plan_df['方案类型'] = plan_df['pattern_type']
             
             # 按方案类型分组显示
-            for pattern_type in plan_df['方案类型'].unique():
-                st.write(f"**{pattern_type}**")
-                pattern_data = plan_df[plan_df['方案类型'] == pattern_type]
-                
-                for _, row in pattern_data.iterrows():
-                    col1, col2, col3 = st.columns([3, 1, 2])
-                    with col1:
-                        st.write(f"切割方案: {row['pattern']}")
-                    with col2:
-                        st.write(f"×{row['runs']}车")
-                    with col3:
-                        st.write(f"利用率: {row['利用率%']}%")
-                
-                st.write("---")
+            for i, plan in enumerate(result['production_plan']):
+                col1, col2, col3 = st.columns([3, 1, 2])
+                with col1:
+                    st.write(f"**{plan['pattern']}**")
+                with col2:
+                    st.write(f"×{plan['runs']}车")
+                with col3:
+                    st.write(f"利用率: {plan['utilization']*100:.1f}%")
             
             # 详细数据表
             with st.expander("查看详细数据"):
-                display_df = plan_df[['pattern', 'runs', '利用率%', '方案类型']]
+                display_df = plan_df[['pattern', 'runs', '利用率%', 'pattern_type']]
                 st.dataframe(display_df, use_container_width=True)
+        else:
+            st.warning("未生成生产计划")
         
         # 生产完成情况
         st.subheader("✅ 生产完成情况")
         
-        completion_df = pd.DataFrame([
-            (width, orders[width], result['actual_production'][width], 
-             result['actual_production'][width] - orders[width])
-            for width in orders.keys()
-        ], columns=['规格', '订单数量', '实际生产', '差异'])
+        completion_data = []
+        for width in orders.keys():
+            ordered = orders[width]
+            actual = result['actual_production'][width]
+            diff = actual - ordered
+            completion_data.append((width, ordered, actual, diff))
         
+        completion_df = pd.DataFrame(completion_data, 
+                                   columns=['规格', '订单数量', '实际生产', '差异'])
         st.dataframe(completion_df, use_container_width=True)
         
         # 分析超额生产情况
@@ -361,58 +358,29 @@ def main():
         # 生产效率分析
         st.subheader("📊 生产效率分析")
         
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            avg_runs_per_pattern = result['total_coils'] / len(result['production_plan']) if result['production_plan'] else 0
-            st.metric("平均单方案运行车数", f"{avg_runs_per_pattern:.1f}")
-        
-        with col2:
+        if result['production_plan']:
+            avg_runs_per_pattern = result['total_coils'] / len(result['production_plan'])
             total_pattern_changes = result['pattern_types'] - 1
-            st.metric("预计换刀次数", total_pattern_changes)
-        
-        with col3:
-            efficiency_score = result['utilization_rate'] * 100 - total_pattern_changes * 2
-            st.metric("生产效率评分", f"{efficiency_score:.1f}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("平均单方案运行车数", f"{avg_runs_per_pattern:.1f}")
+            with col2:
+                st.metric("预计换刀次数", total_pattern_changes)
         
         # 优化建议
         st.subheader("💡 生产建议")
         
-        if result['utilization_rate'] > 0.92 and result['pattern_types'] <= 3:
-            st.success("""
-            🎉 **优秀方案**：
-            - 高利用率 + 少换刀次数
-            - 建议按此方案组织生产
-            """)
+        if result['utilization_rate'] > 0.92 and result['pattern_types'] <= 2:
+            st.success("🎉 **优秀方案**：高利用率 + 少换刀次数，建议按此方案组织生产")
         elif result['utilization_rate'] > 0.88:
-            st.info("""
-            👍 **良好方案**：
-            - 平衡了利用率和生产效率
-            - 适合批量生产
-            """)
+            st.info("👍 **良好方案**：平衡了利用率和生产效率，适合批量生产")
         else:
-            st.warning("""
-            ⚠️ **待优化方案**：
-            - 建议调整参数重新计算
-            - 可尝试提高允许损耗率或增加方案种类数
-            """)
-        
-        # 经济效益估算
-        st.subheader("💰 经济效益估算")
-        
-        waste_saving = result['total_waste'] / 1000  # 米
-        cost_per_meter = 0.033 * (master_width/1000) * 6000 / 1000  # 元/米
-        cost_saving = waste_saving * cost_per_meter
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("预计节约原料", f"{waste_saving:.1f}米")
-        with col2:
-            st.metric("预计节约成本", f"{cost_saving:.0f}元")
+            st.warning("⚠️ **待优化方案**：建议调整参数重新计算")
         
         # 下载生产计划
         if result['production_plan']:
-            csv = plan_df[['pattern', 'runs', '利用率%', '方案类型']].to_csv(index=False)
+            csv = pd.DataFrame(result['production_plan'])[['pattern', 'runs', 'utilization']].to_csv(index=False)
             st.download_button(
                 label="📥 下载生产计划",
                 data=csv,
